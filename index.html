@@ -73,6 +73,9 @@
   .swatches{display:flex;flex-wrap:wrap;gap:6px;align-items:center;}
   .sw{width:24px;height:24px;border-radius:6px;border:2px solid #fff;box-shadow:0 0 0 1px var(--line);cursor:pointer;padding:0;}
   .sw.on{box-shadow:0 0 0 2px var(--ink);}
+  .sizer{display:flex;gap:6px;align-items:center;}
+  .sizer .btn{flex:0 0 46px;font-weight:700;}
+  .sizer input{width:72px;padding:7px 6px;border:1px solid var(--line);border-radius:6px;font-size:14px;font-family:inherit;text-align:center;}
   input[type=color]{width:30px;height:28px;padding:1px;border:1px solid var(--line);border-radius:6px;background:#fff;cursor:pointer;}
   .btnrow{display:flex;gap:8px;}
   .btn{flex:1;white-space:nowrap;padding:7px 8px;border-radius:6px;border:1px solid var(--line);background:var(--bg);font-size:13px;cursor:pointer;color:var(--ink);}
@@ -352,7 +355,7 @@ function areaBox(a){
 function bounds(){
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   const add = (x, y) => { x0 = Math.min(x0,x); y0 = Math.min(y0,y); x1 = Math.max(x1,x); y1 = Math.max(y1,y); };
-  S.areas.forEach(a => a.pts.forEach(p => add(p[0], p[1])));
+  S.areas.forEach(a => { a.pts.forEach(p => add(p[0], p[1])); const L = areaLabel(a); add(L.b.x, L.top); });
   S.zones.forEach(z => { add(z.x, z.y); add(z.x + z.w, z.y + z.h); });
   return x0 > x1 ? null : {x:x0, y:y0, w:x1-x0, h:y1-y0};
 }
@@ -455,8 +458,42 @@ function loadText(text){
 /* ---------- map rendering ---------- */
 const ptsStr = a => a.pts.map(p => p[0] + ',' + p[1]).join(' ');
 
-function layoutAvatars(z, n){
-  const pad = 8, head = 28, gap = 6, aw = z.w - pad * 2, ah = z.h - head - pad;
+const FS_DEF = {zone:14, area:15}, FS_MIN = 8, FS_MAX = 96;
+const clampFs = v => Math.max(FS_MIN, Math.min(FS_MAX, Math.round(v)));
+const mctx = document.createElement('canvas').getContext('2d');
+function textW(s, fs){ mctx.font = `700 ${fs}px "Segoe UI", Arial, sans-serif`; return mctx.measureText(s).width; }
+function wrapText(text, fs, maxW){
+  const lines = [];
+  let cur = '';
+  for(let word of String(text).trim().split(/\s+/)){
+    if(!word) continue;
+    const t = cur ? cur + ' ' + word : word;
+    if(textW(t, fs) <= maxW){ cur = t; continue; }
+    if(cur){ lines.push(cur); cur = ''; }
+    while(word.length > 1 && textW(word, fs) > maxW){
+      let n = word.length - 1;
+      while(n > 1 && textW(word.slice(0, n), fs) > maxW) n--;
+      lines.push(word.slice(0, n)); word = word.slice(n);
+    }
+    cur = word;
+  }
+  if(cur || !lines.length) lines.push(cur);
+  return lines;
+}
+function zoneLabel(z, count){
+  const fs = z.fs || FS_DEF.zone, lh = Math.round(fs * 1.25), maxW = Math.max(fs, z.w - 20);
+  const lines = wrapText(z.name, fs, maxW), tail = count ? '· ' + count : '';
+  const own = !!tail && textW(lines[lines.length - 1] + ' ' + tail, fs) > maxW;
+  return {fs, lh, lines, tail, own, head:6 + (lines.length + (own ? 1 : 0)) * lh + 4};
+}
+function areaLabel(a){
+  const b = areaBox(a), fs = a.fs || FS_DEF.area, lh = Math.round(fs * 1.25);
+  const lines = wrapText(a.name, fs, Math.max(fs * 4, b.w));
+  return {b, fs, lh, lines, top:b.y - 12 - fs - (lines.length - 1) * lh};
+}
+
+function layoutAvatars(z, n, head){
+  const pad = 8, gap = 6, aw = z.w - pad * 2, ah = z.h - head - pad;
   for(let s = 76; s >= 22; s -= 2){
     const lh = s >= 38 ? Math.round(Math.max(11, s * .22)) + 4 : 0;
     const cw = s + gap, ch = s + lh + gap;
@@ -471,13 +508,17 @@ function layoutAvatars(z, n){
 
 function zoneMarkup(z, exp){
   const ppl = peopleIn(z.id), hot = !exp && ui.hoverZone === z.id;
+  const lab = zoneLabel(z, ppl.length), tx = z.x + 10, lineY = i => z.y + 6 + lab.fs + i * lab.lh;
   let h = `<g data-t="zone" data-id="${z.id}">` +
     `<clipPath id="zc${z.id}"><rect x="${z.x}" y="${z.y}" width="${z.w}" height="${z.h}"/></clipPath>` +
     `<rect x="${z.x}" y="${z.y}" width="${z.w}" height="${z.h}" rx="6" fill="${z.color}" fill-opacity="${hot ? .45 : .2}" stroke="${z.color}" stroke-width="${hot ? 5 : 2.5}"/>` +
-    `<text x="${z.x + 10}" y="${z.y + 20}" font-size="14" font-weight="700" fill="#0f172a" clip-path="url(#zc${z.id})">${esc(z.name)}` +
-    (ppl.length ? `<tspan fill="#475569" font-weight="600"> &#183; ${ppl.length}</tspan>` : '') + `</text>`;
+    `<text font-size="${lab.fs}" font-weight="700" fill="#0f172a" clip-path="url(#zc${z.id})">` +
+    lab.lines.map((ln, i) => `<tspan x="${tx}" y="${lineY(i)}">${esc(ln)}</tspan>`).join('') +
+    (!lab.tail ? '' : lab.own
+      ? `<tspan x="${tx}" y="${lineY(lab.lines.length)}" fill="#475569" font-weight="600">${lab.tail}</tspan>`
+      : `<tspan fill="#475569" font-weight="600"> ${lab.tail}</tspan>`) + `</text>`;
   if(ppl.length){
-    const L = layoutAvatars(z, ppl.length);
+    const L = layoutAvatars(z, ppl.length, lab.head);
     const slot = i => [z.x + L.pad + (i % L.cols) * L.cw, z.y + L.head + Math.floor(i / L.cols) * L.ch];
     ppl.slice(0, L.shown).forEach((p, i) => {
       const [x, y] = slot(i), s = L.s, r = s / 2, src = photoSrc(p.id, exp);
@@ -512,8 +553,9 @@ function worldMarkup(exp){
       if(kind === 'lot') h += `<polygon points="${ptsStr(a)}" fill="url(#hatch)" pointer-events="none"/>`;
     }
     for(const a of list){
-      const b = areaBox(a);
-      h += `<text x="${b.x + b.w / 2}" y="${b.y - 12}" text-anchor="middle" font-size="15" font-weight="700" fill="${kind === 'building' ? '#334155' : '#64748b'}" pointer-events="none">${esc(a.name)}</text>`;
+      const L = areaLabel(a), cx = L.b.x + L.b.w / 2, n = L.lines.length;
+      h += `<text text-anchor="middle" font-size="${L.fs}" font-weight="700" fill="${kind === 'building' ? '#334155' : '#64748b'}" pointer-events="none">` +
+        L.lines.map((ln, i) => `<tspan x="${cx}" y="${L.b.y - 12 - (n - 1 - i) * L.lh}">${esc(ln)}</tspan>`).join('') + `</text>`;
     }
   }
   for(const z of S.zones) h += zoneMarkup(z, exp);
@@ -613,7 +655,7 @@ function fit(){
   const b = bounds(), r = svg.getBoundingClientRect();
   if(!b || !r.width){ ui.view = {x:60, y:60, k:1}; render(); return; }
   const k = Math.max(.15, Math.min(2, (r.width - 100) / Math.max(b.w, 1), (r.height - 120) / Math.max(b.h, 1)));
-  ui.view = {k, x:(r.width - b.w * k) / 2 - b.x * k, y:(r.height - b.h * k) / 2 - b.y * k + 10};
+  ui.view = {k, x:(r.width - b.w * k) / 2 - b.x * k, y:(r.height - b.h * k) / 2 - b.y * k};
   render();
 }
 function zoomAt(cx, cy, f){
@@ -642,10 +684,15 @@ function renderProps(){
   const el = $('#props'), s = ui.mode === 'layout' ? getSel() : null;
   if(!s){ el.style.display = 'none'; el.innerHTML = ''; return; }
   el.style.display = 'block';
+  const sizer = `<div class="field"><label>Label size</label><div class="sizer">
+      <button class="btn" data-act="fsDown" title="Smaller label">A&minus;</button>
+      <input type="number" data-f="fs" min="${FS_MIN}" max="${FS_MAX}" value="${s.fs || FS_DEF[ui.sel.type]}">
+      <button class="btn" data-act="fsUp" title="Larger label">A+</button></div></div>`;
   if(ui.sel.type === 'area'){
     el.innerHTML = `<h2>${AREA[s.kind].label}</h2><div class="body">
       <div class="field"><label>Name</label><input type="text" data-f="name" value="${esc(s.name)}"></div>
       <div class="field"><label>Type</label><select data-f="kind"><option value="building"${s.kind === 'building' ? ' selected' : ''}>Building</option><option value="lot"${s.kind === 'lot' ? ' selected' : ''}>Parking / yard</option></select></div>
+      ${sizer}
       <div class="btnrow"><button class="btn" data-act="dup">Duplicate</button><button class="btn danger" data-act="del">Delete</button></div>
       <p class="note">Drag a corner to reshape. Drag a <b>+</b> on a wall to pull out or push in a section. Double-click a corner to remove it.</p></div>`;
   } else {
@@ -653,6 +700,7 @@ function renderProps(){
       <div class="field"><label>Name</label><input type="text" data-f="name" value="${esc(s.name)}"></div>
       <div class="field"><label>Color</label><div class="swatches">${PALETTE.map(c => `<button class="sw${c === s.color ? ' on' : ''}" data-color="${c}" style="background:${c}" title="${c}"></button>`).join('')}
         <input type="color" data-f="color" value="${esc(s.color)}" title="Custom color"></div></div>
+      ${sizer}
       <div class="btnrow"><button class="btn" data-act="dup">Duplicate</button><button class="btn danger" data-act="del">Delete</button></div></div>`;
   }
 }
@@ -999,20 +1047,25 @@ $('#props').addEventListener('input', e => {
   const s = getSel(), f = e.target.dataset.f; if(!s || !f) return;
   if(f === 'name'){ s.name = e.target.value; render(); renderZones(); renderPeople(); }
   if(f === 'color'){ s.color = e.target.value; render(); renderZones(); }
+  if(f === 'fs'){ const v = parseInt(e.target.value, 10); if(v >= FS_MIN && v <= FS_MAX){ s.fs = v; render(); } }
 });
 $('#props').addEventListener('change', e => {
   const s = getSel(), f = e.target.dataset.f; if(!s || !f) return;
   if(f === 'kind') s.kind = e.target.value;
+  if(f === 'fs') s.fs = clampFs(parseInt(e.target.value, 10) || FS_DEF[ui.sel.type]);
   if(f === 'name' && !s.name.trim()) s.name = ui.sel.type === 'zone' ? 'Zone' : AREA[s.kind].label;
   commit();
 });
-$('#props').addEventListener('keydown', e => { if(e.key === 'Enter' && e.target.dataset.f === 'name') e.target.blur(); });
+$('#props').addEventListener('keydown', e => { if(e.key === 'Enter' && /^(name|fs)$/.test(e.target.dataset.f)) e.target.blur(); });
 $('#props').addEventListener('click', e => {
   const s = getSel(); if(!s) return;
   const sw = e.target.closest('[data-color]'), act = e.target.closest('[data-act]');
   if(sw){ s.color = sw.dataset.color; commit(); }
   if(act && act.dataset.act === 'del') deleteSel();
   if(act && act.dataset.act === 'dup') duplicateSel();
+  if(act && /^fs(Up|Down)$/.test(act.dataset.act)){
+    s.fs = clampFs((s.fs || FS_DEF[ui.sel.type]) + (act.dataset.act === 'fsUp' ? 2 : -2)); commit();
+  }
 });
 $('#zoneList').addEventListener('click', e => {
   const r = e.target.closest('.zrow'); if(!r) return;
@@ -1116,7 +1169,7 @@ $('#dnAdd').onclick = () => {
 /* ---------- share: image export ---------- */
 function buildExport(){
   const b = bounds(); if(!b) return null;
-  const pad = 50, top = 24, cw = b.w + pad * 2, ch = b.h + pad * 2 + top;
+  const pad = 50, cw = b.w + pad * 2, ch = b.h + pad * 2;
   const cut = (s, n) => s.length > n ? s.slice(0, n - 1) + '…' : s;
   let y = 52;
   let lg = `<text x="0" y="22" font-size="20" font-weight="700" fill="#0f172a">${esc(cut(S.title, 28))}</text>` +
@@ -1132,7 +1185,7 @@ function buildExport(){
   const LW = 270, W = Math.round(cw + LW + pad), H = Math.round(Math.max(ch, y + pad * 2));
   const svgText = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="Segoe UI, Arial, sans-serif">` +
     `<defs>${DEFS}</defs><rect width="${W}" height="${H}" fill="#fff"/>` +
-    `<g transform="translate(${pad - b.x} ${pad + top - b.y})">${worldMarkup(true)}</g>` +
+    `<g transform="translate(${pad - b.x} ${pad - b.y})">${worldMarkup(true)}</g>` +
     `<line x1="${cw}" y1="${pad}" x2="${cw}" y2="${H - pad}" stroke="#e2e8f0"/>` +
     `<g transform="translate(${cw + 24} ${pad})">${lg}</g></svg>`;
   return {W, H, svg:svgText};
