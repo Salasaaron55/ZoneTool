@@ -130,7 +130,8 @@
     <button class="tb" data-tool="lot">+ Parking</button>
     <button class="tb" data-tool="zone">+ Zone</button>
     <span class="sep"></span>
-    <label class="chk" title="Snap to a 10-unit grid"><input type="checkbox" id="chkSnap" checked> Snap</label>
+    <label class="chk" title="Snap to a 10-unit grid"><input type="checkbox" id="chkSnap" checked> Grid snap</label>
+    <label class="chk" title="Show a line and snap when an edge lines up with another zone or wall"><input type="checkbox" id="chkGuide" checked> Align guides</label>
     <label class="chk" title="Keep walls at right angles while reshaping"><input type="checkbox" id="chkRight" checked> Square corners</label>
     <span class="sep"></span>
   </div>
@@ -244,6 +245,7 @@
       <li><b>+ Building</b> or <b>+ Parking</b>, then drag on the canvas to draw a rectangle.</li>
       <li>Select it and drag a corner to resize. Drag a <b>+</b> on any wall to pull out (or push in) a section. Double-click a corner to remove it.</li>
       <li><b>+ Zone</b>, then drag to draw a zone. Name it and pick a color on the right. Drag its handles to resize.</li>
+      <li>A pink line appears, and the shape snaps, when an edge or center lines up with another zone or wall.</li>
     </ul>
     <p><b>2. Assign people</b> (Assign people)</p>
     <ul>
@@ -281,7 +283,7 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 
 let S = blank();
 let photos = {};
-const ui = {mode:'layout', tool:'select', sel:null, view:{x:60,y:60,k:1}, snap:true, right:true,
+const ui = {mode:'layout', tool:'select', sel:null, view:{x:60,y:60,k:1}, snap:true, right:true, guideOn:true, guides:null,
             drag:null, draft:null, hoverZone:null, space:false, q:'', filter:'all'};
 let fileHandle = null;
 
@@ -544,7 +546,56 @@ function worldMarkup(exp){
     const d = ui.draft, x = Math.min(d.x0, d.x1), y = Math.min(d.y0, d.y1);
     h += `<rect x="${x}" y="${y}" width="${Math.abs(d.x1 - d.x0)}" height="${Math.abs(d.y1 - d.y0)}" fill="#2563eb" fill-opacity=".1" stroke="#2563eb" stroke-width="${2/k}" stroke-dasharray="${6/k} ${4/k}" pointer-events="none"/>`;
   }
+  if(ui.guides){
+    const ext = 16 / k, st = `stroke="#e11d8f" stroke-width="${1.5/k}" pointer-events="none"`;
+    for(const g of ui.guides.x) h += `<line x1="${g.v}" y1="${g.a - ext}" x2="${g.v}" y2="${g.b + ext}" ${st}/>`;
+    for(const g of ui.guides.y) h += `<line x1="${g.a - ext}" y1="${g.v}" x2="${g.b + ext}" y2="${g.v}" ${st}/>`;
+  }
   return h;
+}
+
+/* ---------- alignment guides ---------- */
+// skip.zone / skip.area leave a shape out; skip.sx / skip.sy leave out only those corners of skip.area, per axis
+function guideTargets(skip = {}){
+  const T = {xs:[], ys:[], cxs:[], cys:[]};
+  for(const z of S.zones){
+    if(z.id === skip.zone) continue;
+    for(const v of [z.x, z.x + z.w]) T.xs.push({v, a:z.y, b:z.y + z.h});
+    for(const v of [z.y, z.y + z.h]) T.ys.push({v, a:z.x, b:z.x + z.w});
+    T.cxs.push({v:z.x + z.w / 2, a:z.y, b:z.y + z.h});
+    T.cys.push({v:z.y + z.h / 2, a:z.x, b:z.x + z.w});
+  }
+  for(const ar of S.areas){
+    const mine = ar.id === skip.area;
+    if(mine && !skip.sx) continue;
+    ar.pts.forEach((p, i) => {
+      if(!(mine && skip.sx.has(i))) T.xs.push({v:p[0], a:p[1], b:p[1]});
+      if(!(mine && skip.sy.has(i))) T.ys.push({v:p[1], a:p[0], b:p[0]});
+    });
+  }
+  return T;
+}
+function alignShift(vals, targets, cvals = [], ctargets = []){
+  if(!ui.guideOn) return 0;
+  const tol = 6 / ui.view.k;
+  let best = null;
+  const scan = (ms, ts) => { for(const m of ms) for(const t of ts){
+    const d = t.v - m;
+    if(Math.abs(d) <= tol && (best === null || Math.abs(d) < Math.abs(best))) best = d;
+  } };
+  scan(vals, targets); scan(cvals, ctargets);
+  return best || 0;
+}
+// lo..hi is how far the moving shape reaches along the line
+function guideLines(vals, targets, lo, hi){
+  if(!ui.guideOn) return [];
+  const out = new Map();
+  for(const m of vals) for(const t of targets){
+    if(Math.abs(t.v - m) > .01) continue;
+    const key = Math.round(t.v * 100), g = out.get(key) || {v:t.v, a:lo, b:hi};
+    g.a = Math.min(g.a, t.a); g.b = Math.max(g.b, t.b); out.set(key, g);
+  }
+  return [...out.values()];
 }
 function applyView(){ world.setAttribute('transform', `translate(${ui.view.x} ${ui.view.y}) scale(${ui.view.k})`); }
 function render(){
@@ -672,7 +723,9 @@ svg.addEventListener('pointerdown', e => {
   const [wx, wy] = toWorld(e.clientX, e.clientY);
   if(e.button === 1 || ui.space){ startPan(e); return; }
   if(ui.mode === 'layout' && ui.tool !== 'select'){
-    const x = sn(wx), y = sn(wy);
+    const T = guideTargets();
+    let x = sn(wx), y = sn(wy);
+    x += alignShift([x], T.xs); y += alignShift([y], T.ys);
     ui.draft = {x0:x, y0:y, x1:x, y1:y}; ui.drag = {kind:'draw'}; render(); return;
   }
   if(type === 'avatar'){ ui.drag = {kind:'avatar', pid:t.dataset.id, src:'map', sx:e.clientX, sy:e.clientY, active:false}; return; }
@@ -717,30 +770,74 @@ window.addEventListener('pointermove', e => {
   switch(d.kind){
     case 'pan':
       ui.view.x = d.vx + e.clientX - d.sx; ui.view.y = d.vy + e.clientY - d.sy; applyView(); break;
-    case 'draw':
-      ui.draft.x1 = sn(wx); ui.draft.y1 = sn(wy); render(); break;
+    case 'draw': {
+      const T = guideTargets(), f = ui.draft;
+      let x = sn(wx), y = sn(wy);
+      x += alignShift([x], T.xs); y += alignShift([y], T.ys);
+      f.x1 = x; f.y1 = y;
+      ui.guides = {x:guideLines([x], T.xs, Math.min(f.y0, y), Math.max(f.y0, y)),
+                   y:guideLines([y], T.ys, Math.min(f.x0, x), Math.max(f.x0, x))};
+      render(); break;
+    }
     case 'move': {
       const ox = d.type === 'zone' ? d.orig.x : d.orig[0][0], oy = d.type === 'zone' ? d.orig.y : d.orig[0][1];
       const dx = sn(ox + wx - d.wx) - ox, dy = sn(oy + wy - d.wy) - oy;
-      if(dx || dy) d.moved = true;
-      if(d.type === 'zone'){ d.o.x = d.orig.x + dx; d.o.y = d.orig.y + dy; }
-      else d.o.pts = d.orig.map(p => [p[0] + dx, p[1] + dy]);
+      if(d.type === 'zone'){
+        const T = guideTargets({zone:d.o.id}), w = d.o.w, hh = d.o.h;
+        let x = d.orig.x + dx, y = d.orig.y + dy;
+        x += alignShift([x, x + w], T.xs, [x + w / 2], T.cxs);
+        y += alignShift([y, y + hh], T.ys, [y + hh / 2], T.cys);
+        d.o.x = x; d.o.y = y;
+        ui.guides = {x:[...guideLines([x, x + w], T.xs, y, y + hh), ...guideLines([x + w / 2], T.cxs, y, y + hh)],
+                     y:[...guideLines([y, y + hh], T.ys, x, x + w), ...guideLines([y + hh / 2], T.cys, x, x + w)]};
+        if(x !== d.orig.x || y !== d.orig.y) d.moved = true;
+      } else {
+        const T = guideTargets({area:d.o.id});
+        const ux = [...new Set(d.orig.map(p => p[0] + dx))], uy = [...new Set(d.orig.map(p => p[1] + dy))];
+        const sx = dx + alignShift(ux, T.xs), sy = dy + alignShift(uy, T.ys);
+        d.o.pts = d.orig.map(p => [p[0] + sx, p[1] + sy]);
+        const b = areaBox(d.o);
+        ui.guides = {x:guideLines(ux.map(v => v - dx + sx), T.xs, b.y, b.y + b.h),
+                     y:guideLines(uy.map(v => v - dy + sy), T.ys, b.x, b.x + b.w)};
+        if(sx || sy) d.moved = true;
+      }
       render(); break;
     }
-    case 'rz':
-      Object.assign(d.z, resizeRect(d.o, d.h, sn(wx), sn(wy))); d.moved = true; render(); break;
+    case 'rz': {
+      const T = guideTargets({zone:d.z.id}), hx = /[we]/.test(d.h), hy = /[ns]/.test(d.h);
+      let x = sn(wx), y = sn(wy);
+      if(hx) x += alignShift([x], T.xs);
+      if(hy) y += alignShift([y], T.ys);
+      const z = Object.assign(d.z, resizeRect(d.o, d.h, x, y));
+      ui.guides = {x:hx ? guideLines([d.h.includes('w') ? z.x : z.x + z.w], T.xs, z.y, z.y + z.h) : [],
+                   y:hy ? guideLines([d.h.includes('n') ? z.y : z.y + z.h], T.ys, z.x, z.x + z.w) : []};
+      d.moved = true; render(); break;
+    }
     case 'vtx': {
-      const x = sn(wx), y = sn(wy), P = d.a.pts;
+      const P = d.a.pts, skx = new Set([d.i]), sky = new Set([d.i]);
+      if(ui.right){
+        if(d.lp[0]) skx.add(d.pi); if(d.lp[1]) sky.add(d.pi);
+        if(d.ln[0]) skx.add(d.ni); if(d.ln[1]) sky.add(d.ni);
+      }
+      const T = guideTargets({area:d.a.id, sx:skx, sy:sky});
+      let x = sn(wx), y = sn(wy);
+      x += alignShift([x], T.xs); y += alignShift([y], T.ys);
       P[d.i] = [x, y];
       if(ui.right){
         if(d.lp[0]) P[d.pi][0] = x; if(d.lp[1]) P[d.pi][1] = y;
         if(d.ln[0]) P[d.ni][0] = x; if(d.ln[1]) P[d.ni][1] = y;
       }
+      ui.guides = {x:guideLines([x], T.xs, y, y), y:guideLines([y], T.ys, x, x)};
       d.moved = true; render(); break;
     }
     case 'bump': {
-      const v = sn(d.ax ? wy : wx);
-      d.a.pts[d.i1][d.ax] = v; d.a.pts[d.i1 + 1][d.ax] = v;
+      const P = d.a.pts, mv = new Set([d.i1, d.i1 + 1]), none = new Set(), o = 1 - d.ax;
+      const T = guideTargets({area:d.a.id, sx:d.ax ? none : mv, sy:d.ax ? mv : none}), ts = d.ax ? T.ys : T.xs;
+      let v = sn(d.ax ? wy : wx);
+      v += alignShift([v], ts);
+      P[d.i1][d.ax] = v; P[d.i1 + 1][d.ax] = v;
+      const lines = guideLines([v], ts, Math.min(P[d.i1][o], P[d.i1 + 1][o]), Math.max(P[d.i1][o], P[d.i1 + 1][o]));
+      ui.guides = d.ax ? {x:[], y:lines} : {x:lines, y:[]};
       d.moved = Math.abs(v - d.base) >= 1; render(); break;
     }
     case 'avatar': {
@@ -764,6 +861,8 @@ function endDrag(e){
   const d = ui.drag; if(!d) return;
   ui.drag = null;
   svg.classList.remove('panning');
+  const hadGuides = ui.guides; ui.guides = null;
+  if(hadGuides && d.kind !== 'draw') render();
   switch(d.kind){
     case 'draw': {
       const f = ui.draft; ui.draft = null;
@@ -839,6 +938,7 @@ $('#modeSeg').addEventListener('click', e => { const b = e.target.closest('[data
 $('#layoutTools').addEventListener('click', e => { const b = e.target.closest('[data-tool]'); if(b) setTool(b.dataset.tool); });
 $('#chkSnap').onchange = e => { ui.snap = e.target.checked; };
 $('#chkRight').onchange = e => { ui.right = e.target.checked; };
+$('#chkGuide').onchange = e => { ui.guideOn = e.target.checked; };
 $('#btnUndo').onclick = undo; $('#btnRedo').onclick = redo;
 $('#btnHelp').onclick = () => $('#dlgHelp').showModal();
 $('#dhClose').onclick = () => $('#dlgHelp').close();
