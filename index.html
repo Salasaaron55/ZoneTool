@@ -42,7 +42,13 @@
   #map{width:100%;height:100%;display:block;touch-action:none;cursor:grab;}
   #map.panning{cursor:grabbing;}
   #map.drawing{cursor:crosshair;}
-  #map.layout [data-t=zone],#map.layout [data-t=area]{cursor:move;}
+  #map.layout [data-t=zone],#map.layout [data-t=area],#map.layout [data-t=level]{cursor:move;}
+  #levels{position:absolute;left:12px;top:12px;display:none;flex-wrap:wrap;gap:3px;max-width:calc(100% - 24px);background:#fff;border:1px solid var(--line);border-radius:10px;padding:4px;box-shadow:0 2px 8px rgba(15,23,42,.1);z-index:5;}
+  .lv{border:0;background:transparent;border-radius:7px;padding:6px 12px;font-size:13px;font-weight:600;color:var(--ink2);cursor:pointer;white-space:nowrap;}
+  .lv:hover{background:var(--bg);}
+  .lv.on{background:var(--ink);color:#fff;}
+  .lv.add{color:var(--accent);}
+  .zhead{font-size:11px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;padding:7px 6px 2px;}
   #map.drawing [data-t]{cursor:crosshair;}
   #map [data-t=avatar]{cursor:grab;}
   #map [data-t=vtx]{cursor:pointer;}
@@ -166,6 +172,7 @@
       <defs id="defs"></defs>
       <g id="world"></g>
     </svg>
+    <div id="levels"></div>
     <div id="hint"><div></div></div>
     <div id="status">Loading&hellip;</div>
     <div id="toast"></div>
@@ -249,6 +256,7 @@
       <li>Select it and drag a corner to resize. Drag a <b>+</b> on any wall to pull out (or push in) a section. Double-click a corner to remove it.</li>
       <li><b>+ Zone</b>, then drag to draw a zone. Name it and pick a color on the right. Drag its handles to resize.</li>
       <li>A pink line appears, and the shape snaps, when an edge or center lines up with another zone or wall.</li>
+      <li><b>+ Level</b> (top left of the map) adds an upper floor such as a mezzanine. Drag out where it sits, then add its zones while that level is showing. Click a level's tab to switch to it; click it again to rename or delete it.</li>
     </ul>
     <p><b>2. Assign people</b> (Assign people)</p>
     <ul>
@@ -287,22 +295,26 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 let S = blank();
 let photos = {};
 const ui = {mode:'layout', tool:'select', sel:null, view:{x:60,y:60,k:1}, snap:true, right:true, guideOn:true, guides:null,
-            drag:null, draft:null, hoverZone:null, space:false, q:'', filter:'all'};
+            drag:null, draft:null, hoverZone:null, space:false, q:'', filter:'all', level:null};
 let fileHandle = null;
 
 const svg = $('#map'), world = $('#world'), ghost = $('#ghost'), sidebar = $('#sidebar');
 $('#defs').innerHTML = DEFS;
 
-function blank(){ return {title:'SAT4 Zone Map', areas:[], zones:[], people:[]}; }
+// A level is an upper floor: a footprint rectangle over the building. Zones carry its id in `level`; ground-floor zones have none.
+function blank(){ return {title:'SAT4 Zone Map', areas:[], zones:[], levels:[], people:[]}; }
 
 /* ---------- small helpers ---------- */
 const sn = v => ui.snap ? Math.round(v / GRID) * GRID : Math.round(v);
 const person = id => S.people.find(p => p.id === id);
 const zone = id => S.zones.find(z => z.id === id);
 const peopleIn = zid => S.people.filter(p => p.zoneId === zid).sort((a,b) => a.name.localeCompare(b.name));
+const level = id => S.levels.find(l => l.id === id);
+const zLevel = z => z.level || null;
+const visZones = () => S.zones.filter(z => zLevel(z) === ui.level);
 function getSel(){
   if(!ui.sel) return null;
-  const o = (ui.sel.type === 'zone' ? S.zones : S.areas).find(x => x.id === ui.sel.id);
+  const o = ({zone:S.zones, level:S.levels, area:S.areas})[ui.sel.type].find(x => x.id === ui.sel.id);
   if(!o){ ui.sel = null; return null; }
   return o;
 }
@@ -352,11 +364,11 @@ function areaBox(a){
   const x = Math.min(...xs), y = Math.min(...ys);
   return {x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y};
 }
-function bounds(){
+function bounds(zs = S.zones){
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   const add = (x, y) => { x0 = Math.min(x0,x); y0 = Math.min(y0,y); x1 = Math.max(x1,x); y1 = Math.max(y1,y); };
   S.areas.forEach(a => { a.pts.forEach(p => add(p[0], p[1])); const L = areaLabel(a); add(L.b.x, L.top); });
-  S.zones.forEach(z => { add(z.x, z.y); add(z.x + z.w, z.y + z.h); });
+  [...zs, ...S.levels].forEach(z => { add(z.x, z.y); add(z.x + z.w, z.y + z.h); });
   return x0 > x1 ? null : {x:x0, y:y0, w:x1-x0, h:y1-y0};
 }
 
@@ -372,18 +384,20 @@ function commit(){
 }
 function undo(){ if(hi > 0){ hi--; S = JSON.parse(hist[hi]); refresh(); scheduleSave(); } }
 function redo(){ if(hi < hist.length - 1){ hi++; S = JSON.parse(hist[hi]); refresh(); scheduleSave(); } }
-function refresh(){ getSel(); render(); renderSide(); }
+function refresh(){ if(ui.level && !level(ui.level)) ui.level = null; getSel(); render(); renderSide(); }
 
 function serialize(){
-  return {app:'sat4-zoning', v:2, savedAt:new Date().toISOString(), title:S.title, areas:S.areas, zones:S.zones,
+  return {app:'sat4-zoning', v:2, savedAt:new Date().toISOString(), title:S.title, areas:S.areas, zones:S.zones, levels:S.levels,
           people:S.people.map(p => ({...p, photo: photos[p.id] || null}))};
 }
 function applyData(d){
   if(!d || d.v !== 2 || !Array.isArray(d.zones) || !Array.isArray(d.areas) || !Array.isArray(d.people)) return false;
   photos = {};
-  S = {title: d.title || 'SAT4 Zone Map', areas: d.areas, zones: d.zones,
+  const levels = Array.isArray(d.levels) ? d.levels : [];
+  d.zones.forEach(z => { if(z.level && !levels.some(l => l.id === z.level)) delete z.level; });
+  S = {title: d.title || 'SAT4 Zone Map', areas: d.areas, zones: d.zones, levels,
        people: d.people.map(p => { if(p.photo) photos[p.id] = p.photo; return {id:p.id, name:p.name, zoneId:p.zoneId || null}; })};
-  ui.sel = null;
+  ui.sel = null; ui.level = null;
   resetHistory();
   return true;
 }
@@ -458,7 +472,7 @@ function loadText(text){
 /* ---------- map rendering ---------- */
 const ptsStr = a => a.pts.map(p => p[0] + ',' + p[1]).join(' ');
 
-const FS_DEF = {zone:14, area:15}, FS_MIN = 8, FS_MAX = 96;
+const FS_DEF = {zone:14, area:15, level:14}, FS_MIN = 8, FS_MAX = 96;
 const clampFs = v => Math.max(FS_MIN, Math.min(FS_MAX, Math.round(v)));
 const mctx = document.createElement('canvas').getContext('2d');
 function textW(s, fs){ mctx.font = `700 ${fs}px "Segoe UI", Arial, sans-serif`; return mctx.measureText(s).width; }
@@ -542,9 +556,8 @@ function zoneMarkup(z, exp){
   return h + '</g>';
 }
 
-function worldMarkup(exp){
+function areasMarkup(){
   let h = '';
-  if(!exp && ui.mode === 'layout') h += '<rect x="-30000" y="-30000" width="60000" height="60000" fill="url(#grid)" pointer-events="none"/>';
   for(const kind of ['lot', 'building']){
     const st = AREA[kind], list = S.areas.filter(a => a.kind === kind);
     for(const a of list) h += `<polygon points="${ptsStr(a)}" fill="${st.stroke}" stroke="${st.stroke}" stroke-width="${st.sw}" stroke-linejoin="round"/>`;
@@ -558,8 +571,45 @@ function worldMarkup(exp){
         L.lines.map((ln, i) => `<tspan x="${cx}" y="${L.b.y - 12 - (n - 1 - i) * L.lh}">${esc(ln)}</tspan>`).join('') + `</text>`;
     }
   }
-  for(const z of S.zones) h += zoneMarkup(z, exp);
-  if(exp) return h;
+  return h;
+}
+// Levels that sit on the same footprint are shown and exported together
+function footprintGroups(){
+  const m = new Map();
+  for(const l of S.levels){
+    const key = [l.x, l.y, l.w, l.h].join();
+    if(!m.has(key)) m.set(key, []);
+    m.get(key).push(l);
+  }
+  return [...m.values()];
+}
+function aboveMarkup(){
+  let h = '';
+  for(const g of footprintGroups()){
+    const l = g[0], fs = Math.min(...g.map(x => x.fs || FS_DEF.level)), lh = Math.round(fs * 1.25);
+    // the tag hangs off the bottom edge so it stays clear of whatever is in the zone underneath
+    const px = fs * .6, lines = wrapText(g.map(x => x.name).join(' + ') + ' above', fs, Math.max(fs * 4, l.w - 16 - px * 2));
+    const bw = Math.max(...lines.map(s => textW(s, fs))) + px * 2, bh = lines.length * lh + fs * .3;
+    const bx = l.x + l.w - 8 - bw, by = l.y + l.h - lh * .55;
+    h += `<g pointer-events="none"><rect x="${l.x}" y="${l.y}" width="${l.w}" height="${l.h}" fill="none" stroke="#0f172a" stroke-width="2.5" stroke-dasharray="12 7"/>` +
+      `<rect x="${bx}" y="${by}" width="${bw}" height="${bh}" rx="${fs * .4}" fill="#0f172a"/>` +
+      `<text font-size="${fs}" font-weight="700" fill="#fff">` +
+      lines.map((ln, i) => `<tspan x="${bx + px}" y="${by + fs * 1.08 + i * lh}">${esc(ln)}</tspan>`).join('') + `</text></g>`;
+  }
+  return h;
+}
+
+function worldMarkup(){
+  let h = '';
+  if(ui.mode === 'layout') h += '<rect x="-30000" y="-30000" width="60000" height="60000" fill="url(#grid)" pointer-events="none"/>';
+  h += areasMarkup();
+  const cur = level(ui.level);
+  if(cur){
+    h += `<g opacity=".28" pointer-events="none">${S.zones.filter(z => !z.level).map(z => zoneMarkup(z)).join('')}</g>` +
+      `<rect data-t="level" data-id="${cur.id}" x="${cur.x}" y="${cur.y}" width="${cur.w}" height="${cur.h}" fill="#fff" stroke="#0f172a" stroke-width="3"/>`;
+  }
+  for(const z of visZones()) h += zoneMarkup(z);
+  if(!cur) h += aboveMarkup();
 
   const k = ui.view.k, sel = ui.mode === 'layout' ? getSel() : null;
   if(sel && ui.sel.type === 'area'){
@@ -576,8 +626,8 @@ function worldMarkup(exp){
       h += `<rect data-t="vtx" data-i="${i}" x="${p[0] - 6/k}" y="${p[1] - 6/k}" width="${12/k}" height="${12/k}" rx="${2/k}" fill="#2563eb" stroke="#fff" stroke-width="${2/k}"><title>Drag to reshape. Double-click to remove.</title></rect>`;
     });
   }
-  if(sel && ui.sel.type === 'zone'){
-    h += `<rect x="${sel.x}" y="${sel.y}" width="${sel.w}" height="${sel.h}" rx="6" fill="none" stroke="#0f172a" stroke-width="${2/k}" stroke-dasharray="${6/k} ${4/k}" pointer-events="none"/>`;
+  if(sel && ui.sel.type !== 'area'){
+    h += `<rect x="${sel.x}" y="${sel.y}" width="${sel.w}" height="${sel.h}" rx="${ui.sel.type === 'zone' ? 6 : 0}" fill="none" stroke="#0f172a" stroke-width="${2/k}" stroke-dasharray="${6/k} ${4/k}" pointer-events="none"/>`;
     const xs = {w:sel.x, c:sel.x + sel.w/2, e:sel.x + sel.w}, ys = {n:sel.y, c:sel.y + sel.h/2, s:sel.y + sel.h};
     for(const hd of ['nw','n','ne','e','se','s','sw','w']){
       const x = xs[hd.includes('w') ? 'w' : hd.includes('e') ? 'e' : 'c'], y = ys[hd.includes('n') ? 'n' : hd.includes('s') ? 's' : 'c'];
@@ -600,13 +650,19 @@ function worldMarkup(exp){
 // skip.zone / skip.area leave a shape out; skip.sx / skip.sy leave out only those corners of skip.area, per axis
 function guideTargets(skip = {}){
   const T = {xs:[], ys:[], cxs:[], cys:[]};
-  for(const z of S.zones){
-    if(z.id === skip.zone) continue;
+  const edges = z => {
     for(const v of [z.x, z.x + z.w]) T.xs.push({v, a:z.y, b:z.y + z.h});
     for(const v of [z.y, z.y + z.h]) T.ys.push({v, a:z.x, b:z.x + z.w});
+  };
+  // a footprint being moved lines up with the ground floor and other footprints; anything else with what is on screen
+  const cur = level(ui.level);
+  for(const z of skip.level ? S.zones.filter(z => !z.level) : visZones()){
+    if(z.id === skip.zone) continue;
+    edges(z);
     T.cxs.push({v:z.x + z.w / 2, a:z.y, b:z.y + z.h});
     T.cys.push({v:z.y + z.h / 2, a:z.x, b:z.x + z.w});
   }
+  (skip.level ? S.levels.filter(l => l.id !== skip.level) : cur ? [cur] : []).forEach(edges);
   for(const ar of S.areas){
     const mine = ar.id === skip.area;
     if(mine && !skip.sx) continue;
@@ -642,11 +698,11 @@ function guideLines(vals, targets, lo, hi){
 function applyView(){ world.setAttribute('transform', `translate(${ui.view.x} ${ui.view.y}) scale(${ui.view.k})`); }
 function render(){
   applyView();
-  world.innerHTML = worldMarkup(false);
+  world.innerHTML = worldMarkup();
   svg.classList.toggle('layout', ui.mode === 'layout');
   svg.classList.toggle('drawing', ui.mode === 'layout' && ui.tool !== 'select');
   const hint = $('#hint div');
-  if(S.areas.length || S.zones.length || ui.draft) hint.innerHTML = '';
+  if(S.areas.length || S.zones.length || S.levels.length || ui.draft) hint.innerHTML = '';
   else if(ui.mode !== 'layout') hint.innerHTML = 'The map is blank. Switch to <b>Edit layout</b> to draw the building.';
   else if(ui.tool === 'select') hint.innerHTML = 'The map is blank.<br>Click <b>+ Building</b>, then drag here to draw it.';
   else hint.innerHTML = 'Drag anywhere to draw.';
@@ -671,8 +727,17 @@ function centerOn(z){
 }
 
 /* ---------- sidebar rendering ---------- */
+function renderLevels(){
+  const el = $('#levels'), edit = ui.mode === 'layout';
+  el.style.display = S.levels.length || edit ? 'flex' : 'none';
+  el.innerHTML = (S.levels.length
+      ? `<button class="lv${ui.level ? '' : ' on'}" data-lv="">Ground</button>` +
+        S.levels.map(l => `<button class="lv${ui.level === l.id ? ' on' : ''}" data-lv="${l.id}">${esc(l.name)}</button>`).join('')
+      : '') +
+    (edit ? `<button class="lv add" data-lv="+" title="Add an upper level, such as a mezzanine">+ Level</button>` : '');
+}
 function renderSide(){
-  renderProps(); renderZones(); renderPeople();
+  renderProps(); renderZones(); renderPeople(); renderLevels();
   if(document.activeElement !== $('#title')) $('#title').value = S.title;
   $('#btnUndo').disabled = hi <= 0;
   $('#btnRedo').disabled = hi >= hist.length - 1;
@@ -688,7 +753,13 @@ function renderProps(){
       <button class="btn" data-act="fsDown" title="Smaller label">A&minus;</button>
       <input type="number" data-f="fs" min="${FS_MIN}" max="${FS_MAX}" value="${s.fs || FS_DEF[ui.sel.type]}">
       <button class="btn" data-act="fsUp" title="Larger label">A+</button></div></div>`;
-  if(ui.sel.type === 'area'){
+  if(ui.sel.type === 'level'){
+    el.innerHTML = `<h2>Level</h2><div class="body">
+      <div class="field"><label>Name</label><input type="text" data-f="name" value="${esc(s.name)}"></div>
+      ${sizer}
+      <div class="btnrow"><button class="btn danger" data-act="del">Delete level</button></div>
+      <p class="note">This outline marks where the level sits over the building. Zones you add while viewing this level belong to it. Deleting the level removes its zones.</p></div>`;
+  } else if(ui.sel.type === 'area'){
     el.innerHTML = `<h2>${AREA[s.kind].label}</h2><div class="body">
       <div class="field"><label>Name</label><input type="text" data-f="name" value="${esc(s.name)}"></div>
       <div class="field"><label>Type</label><select data-f="kind"><option value="building"${s.kind === 'building' ? ' selected' : ''}>Building</option><option value="lot"${s.kind === 'lot' ? ' selected' : ''}>Parking / yard</option></select></div>
@@ -706,9 +777,15 @@ function renderProps(){
 }
 function renderZones(){
   $('#zoneCount').textContent = S.zones.length ? S.zones.length : '';
-  $('#zoneList').innerHTML = S.zones.length
-    ? S.zones.map(z => `<div class="zrow${ui.sel && ui.sel.id === z.id ? ' on' : ''}" data-id="${z.id}"><i style="background:${z.color}"></i><span>${esc(z.name)}</span><em>${peopleIn(z.id).length}</em></div>`).join('')
-    : '<div class="empty">No zones yet.</div>';
+  const row = z => `<div class="zrow${ui.sel && ui.sel.id === z.id ? ' on' : ''}" data-id="${z.id}"><i style="background:${z.color}"></i><span>${esc(z.name)}</span><em>${peopleIn(z.id).length}</em></div>`;
+  if(!S.levels.length){
+    $('#zoneList').innerHTML = S.zones.length ? S.zones.map(row).join('') : '<div class="empty">No zones yet.</div>';
+    return;
+  }
+  $('#zoneList').innerHTML = [[null, 'Ground'], ...S.levels.map(l => [l.id, l.name])].map(([id, name]) => {
+    const zs = S.zones.filter(z => zLevel(z) === id);
+    return `<div class="zhead">${esc(name)}</div>` + (zs.length ? zs.map(row).join('') : '<div class="empty">No zones on this level.</div>');
+  }).join('');
 }
 function renderPeople(){
   const on = S.people.filter(p => p.zoneId).length;
@@ -718,9 +795,9 @@ function renderPeople(){
     .filter(p => (ui.filter === 'all' || (ui.filter === 'un') === !p.zoneId) && (!q || p.name.toLowerCase().includes(q)))
     .sort((a, b) => a.name.localeCompare(b.name));
   $('#peopleList').innerHTML = list.length ? list.map(p => {
-    const z = p.zoneId && zone(p.zoneId);
+    const z = p.zoneId && zone(p.zoneId), lv = z && level(z.level);
     return `<div class="prow" data-id="${p.id}">${avatarHTML(p, 38)}<div class="pinfo"><div class="pname">${esc(p.name)}</div>` +
-      `<div class="ploc${z ? '' : ' none'}">${z ? `<i style="background:${z.color}"></i>${esc(z.name)}` : 'Not on map'}</div></div>` +
+      `<div class="ploc${z ? '' : ' none'}">${z ? `<i style="background:${z.color}"></i>${esc((lv ? lv.name + ' / ' : '') + z.name)}` : 'Not on map'}</div></div>` +
       (z ? `<button class="mini" data-act="unassign" title="Take off the map">Remove</button>` : '') +
       `<button class="mini" data-act="edit" title="Edit name or photo">Edit</button></div>`;
   }).join('') : `<div class="empty">${S.people.length ? 'Nobody matches.' : 'No people yet. Add them above, then drag them onto a zone.'}</div>`;
@@ -730,16 +807,31 @@ function renderPeople(){
 function setMode(m){ ui.mode = m; ui.tool = 'select'; ui.sel = null; ui.draft = null; }
 function setTool(t){ ui.tool = t; if(t !== 'select') ui.sel = null; render(); renderSide(); }
 function focusName(){ const i = $('#props [data-f=name]'); if(i){ i.focus(); i.select(); } }
+function setLevel(id){ ui.level = id || null; ui.sel = null; ui.tool = 'select'; ui.draft = null; render(); renderSide(); }
+function addLevel(){
+  const src = level(ui.level) || S.levels[S.levels.length - 1];
+  if(!src){ setTool('level'); toast('Drag over the part of the building this level covers'); return; }
+  const id = uid();
+  S.levels.push({id, name:'Level ' + (S.levels.length + 2), x:src.x, y:src.y, w:src.w, h:src.h, ...(src.fs ? {fs:src.fs} : {})});
+  ui.level = id; ui.sel = {type:'level', id}; ui.tool = 'select';
+  commit(); focusName();
+}
 function deleteSel(){
   const s = getSel(); if(!s) return;
   if(ui.sel.type === 'zone'){
     S.people.forEach(p => { if(p.zoneId === s.id) p.zoneId = null; });
     S.zones = S.zones.filter(z => z !== s);
+  } else if(ui.sel.type === 'level'){
+    const gone = new Set(S.zones.filter(z => z.level === s.id).map(z => z.id));
+    S.people.forEach(p => { if(gone.has(p.zoneId)) p.zoneId = null; });
+    S.zones = S.zones.filter(z => z.level !== s.id);
+    S.levels = S.levels.filter(l => l !== s);
+    ui.level = null;
   } else S.areas = S.areas.filter(a => a !== s);
   ui.sel = null; commit(); toast('Deleted. Undo brings it back.');
 }
 function duplicateSel(){
-  const s = getSel(); if(!s) return;
+  const s = getSel(); if(!s || ui.sel.type === 'level') return;
   const c = JSON.parse(JSON.stringify(s)); c.id = uid(); c.name = s.name + ' copy';
   if(ui.sel.type === 'zone'){ c.x += 20; c.y += 20; S.zones.push(c); }
   else { c.pts = c.pts.map(p => [p[0] + 40, p[1] + 40]); S.areas.push(c); }
@@ -800,12 +892,14 @@ svg.addEventListener('pointerdown', e => {
     }
     render();
   } else if(type === 'rz' && sel){
-    ui.drag = {kind:'rz', z:sel, h:t.dataset.h, o:{x:sel.x, y:sel.y, w:sel.w, h:sel.h}, moved:false};
-  } else if(type === 'zone' || type === 'area'){
+    ui.drag = {kind:'rz', z:sel, h:t.dataset.h, o:{x:sel.x, y:sel.y, w:sel.w, h:sel.h}, moved:false,
+               skip:ui.sel.type === 'level' ? {level:sel.id} : {zone:sel.id}};
+  } else if(type === 'zone' || type === 'area' || type === 'level'){
     const id = t.dataset.id;
     if(!ui.sel || ui.sel.id !== id){ ui.sel = {type, id}; render(); renderSide(); }
     const o = getSel();
-    ui.drag = {kind:'move', o, type, wx, wy, moved:false, orig:type === 'zone' ? {x:o.x, y:o.y} : o.pts.map(p => p.slice())};
+    ui.drag = {kind:'move', o, type, wx, wy, moved:false, orig:type === 'area' ? o.pts.map(p => p.slice()) : {x:o.x, y:o.y},
+               kids:type === 'level' ? S.zones.filter(z => z.level === id).map(z => ({z, x:z.x, y:z.y})) : []};
   } else {
     if(ui.sel){ ui.sel = null; render(); renderSide(); }
     startPan(e);
@@ -828,14 +922,15 @@ window.addEventListener('pointermove', e => {
       render(); break;
     }
     case 'move': {
-      const ox = d.type === 'zone' ? d.orig.x : d.orig[0][0], oy = d.type === 'zone' ? d.orig.y : d.orig[0][1];
+      const ox = d.type === 'area' ? d.orig[0][0] : d.orig.x, oy = d.type === 'area' ? d.orig[0][1] : d.orig.y;
       const dx = sn(ox + wx - d.wx) - ox, dy = sn(oy + wy - d.wy) - oy;
-      if(d.type === 'zone'){
-        const T = guideTargets({zone:d.o.id}), w = d.o.w, hh = d.o.h;
+      if(d.type !== 'area'){
+        const T = guideTargets(d.type === 'level' ? {level:d.o.id} : {zone:d.o.id}), w = d.o.w, hh = d.o.h;
         let x = d.orig.x + dx, y = d.orig.y + dy;
         x += alignShift([x, x + w], T.xs, [x + w / 2], T.cxs);
         y += alignShift([y, y + hh], T.ys, [y + hh / 2], T.cys);
         d.o.x = x; d.o.y = y;
+        d.kids.forEach(c => { c.z.x = c.x + x - d.orig.x; c.z.y = c.y + y - d.orig.y; });
         ui.guides = {x:[...guideLines([x, x + w], T.xs, y, y + hh), ...guideLines([x + w / 2], T.cxs, y, y + hh)],
                      y:[...guideLines([y, y + hh], T.ys, x, x + w), ...guideLines([y + hh / 2], T.cys, x, x + w)]};
         if(x !== d.orig.x || y !== d.orig.y) d.moved = true;
@@ -852,7 +947,7 @@ window.addEventListener('pointermove', e => {
       render(); break;
     }
     case 'rz': {
-      const T = guideTargets({zone:d.z.id}), hx = /[we]/.test(d.h), hy = /[ns]/.test(d.h);
+      const T = guideTargets(d.skip), hx = /[we]/.test(d.h), hy = /[ns]/.test(d.h);
       let x = sn(wx), y = sn(wy);
       if(hx) x += alignShift([x], T.xs);
       if(hy) y += alignShift([y], T.ys);
@@ -918,8 +1013,12 @@ function endDrag(e){
       if(w < 30 || h < 30){ render(); toast('Drag to draw a bigger shape'); break; }
       const id = uid(), tool = ui.tool;
       if(tool === 'zone'){
-        S.zones.push({id, name:'Zone ' + (S.zones.length + 1), color:PALETTE[S.zones.length % PALETTE.length], x, y, w, h});
+        S.zones.push({id, name:'Zone ' + (S.zones.length + 1), color:PALETTE[S.zones.length % PALETTE.length], x, y, w, h,
+                      ...(ui.level ? {level:ui.level} : {})});
         ui.sel = {type:'zone', id};
+      } else if(tool === 'level'){
+        S.levels.push({id, name:'Level ' + (S.levels.length + 2), x, y, w, h});
+        ui.level = id; ui.sel = {type:'level', id};
       } else {
         const n = S.areas.filter(a => a.kind === tool).length + 1;
         S.areas.push({id, kind:tool, name:AREA[tool].label + (n > 1 || tool === 'lot' ? ' ' + n : ''), pts:[[x,y],[x+w,y],[x+w,y+h],[x,y+h]]});
@@ -937,8 +1036,9 @@ function endDrag(e){
       ui.hoverZone = null;
       const p = person(d.pid); if(!p){ render(); break; }
       if(!d.active){
+        const z = p.zoneId && zone(p.zoneId);
         if(d.src === 'map') flashPerson(p.id);
-        else if(p.zoneId && zone(p.zoneId)) centerOn(zone(p.zoneId));
+        else if(z){ if(zLevel(z) !== ui.level) setLevel(zLevel(z)); centerOn(z); }
         break;
       }
       const t = dropTarget(e.clientX, e.clientY);
@@ -957,9 +1057,9 @@ function dropTarget(cx, cy){
   if(!el) return {type:'none'};
   if(el.closest('#sidebar')) return {type:'roster'};
   if(!el.closest('#canvasWrap')) return {type:'none'};
-  const [wx, wy] = toWorld(cx, cy);
-  for(let i = S.zones.length - 1; i >= 0; i--){
-    const z = S.zones[i];
+  const [wx, wy] = toWorld(cx, cy), zs = visZones();
+  for(let i = zs.length - 1; i >= 0; i--){
+    const z = zs[i];
     if(wx >= z.x && wx <= z.x + z.w && wy >= z.y && wy <= z.y + z.h) return {type:'zone', id:z.id};
   }
   return {type:'map'};
@@ -973,7 +1073,7 @@ function flashPerson(id){
 svg.addEventListener('dblclick', e => {
   const t = e.target.closest('[data-t]'), sel = getSel();
   if(t && t.dataset.t === 'vtx' && sel && ui.sel.type === 'area') removeVertex(sel, +t.dataset.i);
-  else if(t && (t.dataset.t === 'zone' || t.dataset.t === 'area') && ui.mode === 'layout') focusName();
+  else if(t && /^(zone|area|level)$/.test(t.dataset.t) && ui.mode === 'layout') focusName();
 });
 svg.addEventListener('contextmenu', e => e.preventDefault());
 svg.addEventListener('wheel', e => { e.preventDefault(); zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.12 : 1 / 1.12); }, {passive:false});
@@ -1036,7 +1136,11 @@ window.addEventListener('keydown', e => {
   const mv = {ArrowLeft:[-step,0], ArrowRight:[step,0], ArrowUp:[0,-step], ArrowDown:[0,step]}[e.key];
   if(mv && s){
     e.preventDefault();
-    if(ui.sel.type === 'zone'){ s.x += mv[0]; s.y += mv[1]; } else s.pts = s.pts.map(p => [p[0] + mv[0], p[1] + mv[1]]);
+    if(ui.sel.type === 'area') s.pts = s.pts.map(p => [p[0] + mv[0], p[1] + mv[1]]);
+    else {
+      const movers = ui.sel.type === 'level' ? [s, ...S.zones.filter(z => z.level === s.id)] : [s];
+      movers.forEach(o => { o.x += mv[0]; o.y += mv[1]; });
+    }
     commit();
   }
 });
@@ -1045,7 +1149,7 @@ window.addEventListener('keyup', e => { if(e.key === ' ') ui.space = false; });
 /* ---------- sidebar events ---------- */
 $('#props').addEventListener('input', e => {
   const s = getSel(), f = e.target.dataset.f; if(!s || !f) return;
-  if(f === 'name'){ s.name = e.target.value; render(); renderZones(); renderPeople(); }
+  if(f === 'name'){ s.name = e.target.value; render(); renderZones(); renderPeople(); renderLevels(); }
   if(f === 'color'){ s.color = e.target.value; render(); renderZones(); }
   if(f === 'fs'){ const v = parseInt(e.target.value, 10); if(v >= FS_MIN && v <= FS_MAX){ s.fs = v; render(); } }
 });
@@ -1053,7 +1157,7 @@ $('#props').addEventListener('change', e => {
   const s = getSel(), f = e.target.dataset.f; if(!s || !f) return;
   if(f === 'kind') s.kind = e.target.value;
   if(f === 'fs') s.fs = clampFs(parseInt(e.target.value, 10) || FS_DEF[ui.sel.type]);
-  if(f === 'name' && !s.name.trim()) s.name = ui.sel.type === 'zone' ? 'Zone' : AREA[s.kind].label;
+  if(f === 'name' && !s.name.trim()) s.name = ui.sel.type === 'zone' ? 'Zone' : ui.sel.type === 'level' ? 'Level' : AREA[s.kind].label;
   commit();
 });
 $('#props').addEventListener('keydown', e => { if(e.key === 'Enter' && /^(name|fs)$/.test(e.target.dataset.f)) e.target.blur(); });
@@ -1070,8 +1174,16 @@ $('#props').addEventListener('click', e => {
 $('#zoneList').addEventListener('click', e => {
   const r = e.target.closest('.zrow'); if(!r) return;
   const z = zone(r.dataset.id); if(!z) return;
+  if(zLevel(z) !== ui.level){ ui.level = zLevel(z); ui.sel = null; }
   if(ui.mode === 'layout') ui.sel = {type:'zone', id:z.id};
   centerOn(z); renderSide();
+});
+$('#levels').addEventListener('click', e => {
+  const b = e.target.closest('[data-lv]'); if(!b) return;
+  const v = b.dataset.lv;
+  if(v === '+'){ addLevel(); return; }
+  if(v && v === ui.level && ui.mode === 'layout'){ ui.sel = {type:'level', id:v}; render(); renderSide(); return; }
+  setLevel(v);
 });
 $('#q').addEventListener('input', e => { ui.q = e.target.value; renderPeople(); });
 $('#filter').addEventListener('change', e => { ui.filter = e.target.value; renderPeople(); });
@@ -1168,26 +1280,66 @@ $('#dnAdd').onclick = () => {
 
 /* ---------- share: image export ---------- */
 function buildExport(){
-  const b = bounds(); if(!b) return null;
-  const pad = 50, cw = b.w + pad * 2, ch = b.h + pad * 2;
+  const ground = S.zones.filter(z => !z.level), b = bounds(ground);
+  if(!b) return null;
+  // u scales the legend and panel titles so they stay readable next to a large map
+  const u = Math.max(1, Math.max(b.w, b.h) / 1100), pad = 50 * u, ox = pad - b.x, oy = pad - b.y;
   const cut = (s, n) => s.length > n ? s.slice(0, n - 1) + '…' : s;
+  let body = `<g transform="translate(${ox} ${oy})">${areasMarkup()}${ground.map(z => zoneMarkup(z, true)).join('')}${aboveMarkup()}</g>`;
+  let right = pad + b.w, bottom = pad + b.h;
+
+  if(S.levels.length){
+    // each upper level is drawn enlarged in a column beside the map, highest level on top
+    const px = right + 70 * u, target = Math.max(360 * u, b.w * .3);
+    let py = pad, colW = 0;
+    for(const g of footprintGroups()){
+      let stackTop = null, stackBot = 0;
+      for(const l of g.slice().reverse()){
+        const zs = S.zones.filter(z => z.level === l.id);
+        let x0 = l.x, y0 = l.y, x1 = l.x + l.w, y1 = l.y + l.h;
+        zs.forEach(z => { x0 = Math.min(x0, z.x); y0 = Math.min(y0, z.y); x1 = Math.max(x1, z.x + z.w); y1 = Math.max(y1, z.y + z.h); });
+        const s = Math.min(3, target / (x1 - x0));
+        body += `<text x="${px}" y="${py + 18 * u}" font-size="${17 * u}" font-weight="700" fill="#0f172a">${esc(cut(l.name, 40))}</text>`;
+        py += 28 * u;
+        if(stackTop === null) stackTop = py;
+        body += `<g transform="translate(${px - x0 * s} ${py - y0 * s}) scale(${s})">` +
+          `<rect x="${l.x}" y="${l.y}" width="${l.w}" height="${l.h}" fill="#fff" stroke="#0f172a" stroke-width="${3 * u / s}"/>` +
+          zs.map(z => zoneMarkup(z, true)).join('') + `</g>`;
+        py += (y1 - y0) * s; stackBot = py; py += 26 * u;
+        colW = Math.max(colW, (x1 - x0) * s);
+      }
+      const l = g[0], fx = ox + l.x + l.w, st = `stroke="#64748b" stroke-width="${1.5 * u}" stroke-dasharray="${8 * u} ${6 * u}" opacity=".75"`;
+      body += `<line x1="${fx}" y1="${oy + l.y}" x2="${px}" y2="${stackTop}" ${st}/><line x1="${fx}" y1="${oy + l.y + l.h}" x2="${px}" y2="${stackBot}" ${st}/>`;
+      py += 10 * u;
+    }
+    right = px + colW; bottom = Math.max(bottom, py - 36 * u);
+  }
+
   let y = 52;
   let lg = `<text x="0" y="22" font-size="20" font-weight="700" fill="#0f172a">${esc(cut(S.title, 28))}</text>` +
            `<text x="0" y="42" font-size="12" fill="#64748b">Updated ${esc(new Date().toLocaleDateString([], {year:'numeric', month:'short', day:'numeric'}))}</text>`;
-  for(const z of S.zones){
-    const names = peopleIn(z.id).map(p => p.name);
-    y += 22;
-    lg += `<rect x="0" y="${y - 12}" width="14" height="14" rx="3" fill="${z.color}"/>` +
-          `<text x="22" y="${y}" font-size="14" font-weight="700" fill="#0f172a">${esc(cut(z.name, 26))}${names.length ? ' (' + names.length + ')' : ''}</text>`;
-    for(const nm of names){ y += 17; lg += `<text x="22" y="${y}" font-size="12.5" fill="#334155">${esc(cut(nm, 34))}</text>`; }
-    y += 6;
+  for(const [id, name] of S.levels.length ? [[null, 'Ground'], ...S.levels.map(l => [l.id, l.name])] : [[null, '']]){
+    const zs = S.zones.filter(z => zLevel(z) === id);
+    if(name){
+      if(!zs.length) continue;
+      y += 28;
+      lg += `<text x="0" y="${y}" font-size="11.5" font-weight="700" fill="#64748b" letter-spacing=".6">${esc(cut(name, 32).toUpperCase())}</text>`;
+    }
+    for(const z of zs){
+      const names = peopleIn(z.id).map(p => p.name);
+      y += 22;
+      lg += `<rect x="0" y="${y - 12}" width="14" height="14" rx="3" fill="${z.color}"/>` +
+            `<text x="22" y="${y}" font-size="14" font-weight="700" fill="#0f172a">${esc(cut(z.name, 26))}${names.length ? ' (' + names.length + ')' : ''}</text>`;
+      for(const nm of names){ y += 17; lg += `<text x="22" y="${y}" font-size="12.5" fill="#334155">${esc(cut(nm, 34))}</text>`; }
+      y += 6;
+    }
   }
-  const LW = 270, W = Math.round(cw + LW + pad), H = Math.round(Math.max(ch, y + pad * 2));
+  const rule = right + 40 * u, lx = rule + 26 * u;
+  const W = Math.round(lx + 270 * u + pad * .4), H = Math.round(Math.max(bottom + pad, pad * 2 + (y + 10) * u));
   const svgText = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="Segoe UI, Arial, sans-serif">` +
-    `<defs>${DEFS}</defs><rect width="${W}" height="${H}" fill="#fff"/>` +
-    `<g transform="translate(${pad - b.x} ${pad - b.y})">${worldMarkup(true)}</g>` +
-    `<line x1="${cw}" y1="${pad}" x2="${cw}" y2="${H - pad}" stroke="#e2e8f0"/>` +
-    `<g transform="translate(${cw + 24} ${pad})">${lg}</g></svg>`;
+    `<defs>${DEFS}</defs><rect width="${W}" height="${H}" fill="#fff"/>${body}` +
+    `<line x1="${rule}" y1="${pad}" x2="${rule}" y2="${H - pad}" stroke="#e2e8f0" stroke-width="${u}"/>` +
+    `<g transform="translate(${lx} ${pad}) scale(${u})">${lg}</g></svg>`;
   return {W, H, svg:svgText};
 }
 async function renderPNG(){
